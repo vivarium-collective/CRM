@@ -60,8 +60,81 @@ def species_data(model_file):
 
     return species_data_dict
 
+import numpy as np
+
+
+def generate_crm_parameters_from_sbml(model_file_dict,
+                                      default_tau=1.0,
+                                      default_m=0.1,
+                                      default_r=0.5,
+                                      default_K=10.0,
+                                      normalize_c=True):
+    """
+    Generate CRM-compatible parameter dictionary from a dictionary of SBML models.
+
+    Args:
+        model_file_dict (dict): {species_name: sbml_path}
+        default_tau (float): default tau per species
+        default_m (float): default maintenance rate per species
+        default_r (float): default resource regen rate
+        default_K (float): default resource carrying capacity
+        normalize_c (bool): if True, normalize c rows to sum to 1
+
+    Returns:
+        dict: parameters compatible with simulate_crm
+    """
+    from cobra.io import read_sbml_model
+
+    species_names = list(model_file_dict.keys())
+    resource_ids = set()
+
+    # First pass: collect all uptake resource IDs
+    for key, path in model_file_dict.items():
+        model = read_sbml_model(path)
+        solution = model.optimize()
+        for rxn in model.exchanges:
+            if solution.fluxes[rxn.id] < 0:
+                resource_ids.add(rxn.id)
+
+    resource_ids = sorted(list(resource_ids))
+    num_species = len(species_names)
+    num_resources = len(resource_ids)
+
+    tau = np.full(num_species, default_tau)
+    m = np.full(num_species, default_m)
+    w = np.full(num_resources, 1.0)  # resource quality (can also use avg flux magnitude)
+    r = np.full(num_resources, default_r)
+    K = np.full(num_resources, default_K)
+    c = np.zeros((num_species, num_resources))
+
+    # Second pass: fill in consumer matrix c
+    for i, species in enumerate(species_names):
+        model = read_sbml_model(model_file_dict[species])
+        solution = model.optimize()
+
+        for j, res in enumerate(resource_ids):
+            if res in solution.fluxes and solution.fluxes[res] < 0:
+                c[i, j] = abs(solution.fluxes[res])  # preference strength = uptake flux
+
+    if normalize_c:
+        row_sums = c.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1  # avoid divide by zero
+        c /= row_sums
+
+    params = {
+        "tau": tau,
+        "m": m,
+        "w": w,
+        "c": c,
+        "r": r,
+        "K": K
+    }
+
+    return params, resource_ids, species_names
+
+
 def basico_model(model_name, species_data):
-    new_model(name=model_name)
+    basico.new_model(name=model_name)
 
     for species in species_data.keys():
         sp_id = species.replace(" ", "_")
@@ -76,69 +149,150 @@ def basico_model(model_name, species_data):
             add_reaction(rxn_id, f"{sp_id} + {resource} -> 2 {sp_id}")
 
 
-def generate_antimony(resources, Vmax, Km, v, delta, Y_map=None, initial_conditions=None):
+def generate_antimony_crm_multi(num_species, num_resources, params=None,
+                                 initial_N=None, initial_R=None, resource_mode='logistic'):
     """
-    Generate a Tellurium Antimony CRM model for ANY number of resources.
+    Generate an Antimony model string for a CRM with arbitrary numbers of species and resources.
 
     Args:
-        resources (list): list of resource names, e.g., ['glucose', 'acetate']
-        Vmax (list): Vmax for each resource
-        Km (list): Km for each resource
-        v (list): Growth value for each resource
-        delta (float): death rate
-        Y_map (dict, optional): {produced_resource: (source_resource, yield_value)}
-            E.g., {'acetate': ('glucose', 1.0)}
-        initial_conditions (dict, optional): {'biomass': value, 'resource_name': value}
-            If not provided, default initial conditions will be used.
+        num_species (int): Number of species
+        num_resources (int): Number of resources
+        params (dict, optional): Contains keys: tau, m, w, c, K/kappa, r
+        initial_N (list or np.array, optional): Initial biomass for each species
+        initial_R (list or np.array, optional): Initial resource concentrations
+        resource_mode (str): One of ['logistic', 'external', 'tilman']
+
     Returns:
         str: Antimony model string
     """
-    model = "model crm_fixed()\n"
+    # If no params provided, generate defaults
+    if params is None:
+        np.random.seed(42)
+        params = {
+            "tau": np.ones(num_species),
+            "m": np.full(num_species, 0.1),
+            "w": np.ones(num_resources),
+            "c": np.ones((num_species, num_resources)),
+            "K": np.full(num_resources, 10.0),
+            "r": np.full(num_resources, 1.0)
+        }
 
-    # Define species
-    model += "    species N"
-    for res in resources:
-        model += f", C_{res}"
-    model += ";\n\n"
+    tau = params["tau"]
+    m = params["m"]
+    w = params["w"]
+    c = params["c"]
+    r = params["r"]
+    K_or_kappa = params["K"] if "K" in params else params["kappa"]
 
-    # Define parameters
-    for i, res in enumerate(resources):
-        model += f"    Vmax_{res} = {Vmax[i]};\n"
-        model += f"    Km_{res} = {Km[i]};\n"
-        model += f"    v_{res} = {v[i]};\n"
-    model += f"    delta = {delta};\n"
-    if Y_map:
-        for prod_res, (source_res, Y_val) in Y_map.items():
-            model += f"    Y_{prod_res}_from_{source_res} = {Y_val};\n"
+    # Initial conditions
+    initial_N = initial_N if initial_N is not None else [0.1] * num_species
+    initial_R = initial_R if initial_R is not None else [5.0] * num_resources
+
+    model = "model crm_dynamic()\n\n"
+
+    # Species declarations
+    species_str = ", ".join([f"N_{i}" for i in range(num_species)] + [f"R_{j}" for j in range(num_resources)])
+    model += f"    species {species_str};\n\n"
+
+    # Parameter declarations
+    for i in range(num_species):
+        model += f"    tau_{i} = {tau[i]}; m_{i} = {m[i]};\n"
+    for j in range(num_resources):
+        model += f"    w_{j} = {w[j]}; r_{j} = {r[j]}; K_{j} = {K_or_kappa[j]};\n"
+    for i in range(num_species):
+        for j in range(num_resources):
+            model += f"    c_{i}_{j} = {c[i][j]};\n"
     model += "\n"
 
     # Initial conditions
-    model += "    N = "
-    model += f"{initial_conditions.get('biomass', 0.1) if initial_conditions else 0.1};\n"
-    for res in resources:
-        init_val = initial_conditions.get(res, 10.0) if initial_conditions else 10.0
-        model += f"    C_{res} = {init_val};\n"
+    for i in range(num_species):
+        model += f"    N_{i} = {initial_N[i]};\n"
+    for j in range(num_resources):
+        model += f"    R_{j} = {initial_R[j]};\n"
+
     model += "\n"
 
-    # Uptake rates
-    for res in resources:
-        model += f"    r_{res} := Vmax_{res} * (C_{res} / (Km_{res} + C_{res}));\n"
-    model += "\n"
-
-    # Biomass growth
-    growth_terms = " + ".join([f"v_{res} * r_{res}" for res in resources])
-    model += f"    N' = N * ({growth_terms} - delta);\n"
+    # Species dynamics
+    for i in range(num_species):
+        growth_expr = " + ".join([f"c_{i}_{j} * w_{j} * R_{j}" for j in range(num_resources)])
+        model += f"    N_{i}' = (N_{i} / tau_{i}) * ({growth_expr} - m_{i});\n"
 
     # Resource dynamics
-    for res in resources:
-        if Y_map and res in Y_map:
-            # This resource is produced by another resource
-            source_res, _ = Y_map[res]
-            model += f"    C_{res}' = N * (Y_{res}_from_{source_res} * r_{source_res} - r_{res});\n"
+    for j in range(num_resources):
+        if resource_mode == 'logistic':
+            regen = f"(r_{j} / K_{j}) * (K_{j} - R_{j}) * R_{j}"
+            cons = " + ".join([f"N_{i} * c_{i}_{j} * R_{j}" for i in range(num_species)])
+        elif resource_mode == 'external':
+            regen = f"r_{j} * (K_{j} - R_{j})"
+            cons = " + ".join([f"N_{i} * c_{i}_{j} * R_{j}" for i in range(num_species)])
+        elif resource_mode == 'tilman':
+            regen = f"r_{j} * (K_{j} - R_{j})"
+            cons = " + ".join([f"N_{i} * c_{i}_{j}" for i in range(num_species)])
         else:
-            # Normal consumption only
-            model += f"    C_{res}' = -N * r_{res};\n"
+            raise ValueError("Unsupported resource_mode")
 
-    model += "end\n"
+        model += f"    R_{j}' = {regen} - ({cons});\n"
 
+    model += "\nend\n"
     return model
+
+
+import tellurium as te
+import basico
+
+
+def run_basico_simulation_from_antimony(ant_str, duration=200, steps=1000):
+    """
+    Load an Antimony string, convert to SBML, simulate using Basico.
+
+    Args:
+        ant_str (str): Antimony model string
+        duration (float): Simulation duration (e.g. 200 hours)
+        steps (int): Number of time steps
+
+    Returns:
+        pandas.DataFrame: Simulation results from Basico
+    """
+    # Convert Antimony → SBML
+    r = te.loada(ant_str)
+    sbml_str = r.getSBML()
+
+    # Load into Basico
+    model = basico.load_model_from_string(sbml_str)
+
+    # Simulate using Basico
+    result_df = basico.run_time_course(duration=duration, steps=steps)
+
+    return result_df
+
+
+import matplotlib.pyplot as plt
+
+def plot_all_species_trajectories(df, species_prefix='N_', title='Population Dynamics', ylabel='Population (cells/mL)'):
+    """
+    Plot time series for all species in the DataFrame that match a given prefix.
+
+    Args:
+        df (pd.DataFrame): Output of basico.run_time_course()
+        species_prefix (str): Filter species columns by this prefix (default 'N_')
+        title (str): Title of the plot
+        ylabel (str): Label for Y-axis
+    """
+    plt.figure(figsize=(8, 6))
+
+    time = df.index
+    species_cols = [col for col in df.columns if col.startswith(species_prefix)]
+
+    if not species_cols:
+        raise ValueError(f"No species found with prefix '{species_prefix}' in DataFrame.")
+
+    for col in species_cols:
+        plt.plot(time, df[col], label=col)
+
+    plt.xlabel('Time (hours)')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.show()

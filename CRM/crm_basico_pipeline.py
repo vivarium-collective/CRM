@@ -1,6 +1,7 @@
 from basico import *
 from cobra.io import read_sbml_model
 import matplotlib.pyplot as plt
+import tellurium as te
 import re
 import os
 
@@ -151,7 +152,6 @@ def basico_model(model_name, species_data):
             add_reaction(rxn_id, f"{sp_id} + {resource} -> 2 {sp_id}")
 
 
-
 def sanitize(name):
     """Sanitize a name to be Antimony-compatible."""
     return re.sub(r'\W|^(?=\d)', '_', name)
@@ -239,9 +239,6 @@ def generate_antimony_crm_multi(species_names, resource_names, params,
     model += "\nend\n"
     return model
 
-import tellurium as te
-import basico
-
 
 def run_basico_simulation_from_antimony(ant_str, duration=200, steps=1000):
     """
@@ -268,22 +265,30 @@ def run_basico_simulation_from_antimony(ant_str, duration=200, steps=1000):
     return result_df
 
 
-def plot_species_and_resources(df, species_names, resource_names, title='CRM Dynamics'):
+def plot_species_and_resources(df, species_names, resource_names, title='CRM Dynamics',
+                               species_to_plot=None, resources_to_plot=None):
     """
     Plot both species and resource dynamics from Basico simulation output.
 
     Args:
         df (pd.DataFrame): Result from basico.run_time_course()
-        species_names (list): Original species names used in Antimony (sanitized)
-        resource_names (list): Original resource names used in Antimony (sanitized)
+        species_names (list): Original species names used in Antimony (unsanitized)
+        resource_names (list): Original resource names used in Antimony (unsanitized)
         title (str): Title of the overall plot
+        species_to_plot (list, optional): Subset of species names to plot
+        resources_to_plot (list, optional): Subset of resource names to plot
     """
+
     def sanitize(name):
-        import re
         return re.sub(r'\W|^(?=\d)', '_', name)
 
-    s_names = [sanitize(n) for n in species_names]
-    r_names = [sanitize(r) for r in resource_names]
+    # Sanitize names
+    s_names_all = [sanitize(n) for n in species_names]
+    r_names_all = [sanitize(r) for r in resource_names]
+
+    # Determine which to plot
+    s_names = [sanitize(n) for n in species_to_plot] if species_to_plot else s_names_all
+    r_names = [sanitize(r) for r in resources_to_plot] if resources_to_plot else r_names_all
 
     time = df.index
 

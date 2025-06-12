@@ -1,5 +1,7 @@
 from basico import *
 from cobra.io import read_sbml_model
+import matplotlib.pyplot as plt
+import re
 import os
 
 
@@ -149,33 +151,30 @@ def basico_model(model_name, species_data):
             add_reaction(rxn_id, f"{sp_id} + {resource} -> 2 {sp_id}")
 
 
-def generate_antimony_crm_multi(num_species, num_resources, params=None,
-                                 initial_N=None, initial_R=None, resource_mode='logistic'):
+
+def sanitize(name):
+    """Sanitize a name to be Antimony-compatible."""
+    return re.sub(r'\W|^(?=\d)', '_', name)
+
+
+def generate_antimony_crm_multi(species_names, resource_names, params,
+                                      initial_N=None, initial_R=None, resource_mode='logistic'):
     """
-    Generate an Antimony model string for a CRM with arbitrary numbers of species and resources.
+    Generate Antimony model using real species and resource names.
 
     Args:
-        num_species (int): Number of species
-        num_resources (int): Number of resources
-        params (dict, optional): Contains keys: tau, m, w, c, K/kappa, r
-        initial_N (list or np.array, optional): Initial biomass for each species
-        initial_R (list or np.array, optional): Initial resource concentrations
-        resource_mode (str): One of ['logistic', 'external', 'tilman']
+        species_names (list): List of species names (e.g. from SBML keys)
+        resource_names (list): List of resource names (e.g. exchange rxn IDs)
+        params (dict): CRM parameter dictionary
+        initial_N (list): Initial species biomass
+        initial_R (list): Initial resource concentrations
+        resource_mode (str): 'logistic', 'external', or 'tilman'
 
     Returns:
         str: Antimony model string
     """
-    # If no params provided, generate defaults
-    if params is None:
-        np.random.seed(42)
-        params = {
-            "tau": np.ones(num_species),
-            "m": np.full(num_species, 0.1),
-            "w": np.ones(num_resources),
-            "c": np.ones((num_species, num_resources)),
-            "K": np.full(num_resources, 10.0),
-            "r": np.full(num_resources, 1.0)
-        }
+    num_species = len(species_names)
+    num_resources = len(resource_names)
 
     tau = params["tau"]
     m = params["m"]
@@ -184,58 +183,61 @@ def generate_antimony_crm_multi(num_species, num_resources, params=None,
     r = params["r"]
     K_or_kappa = params["K"] if "K" in params else params["kappa"]
 
-    # Initial conditions
     initial_N = initial_N if initial_N is not None else [0.1] * num_species
     initial_R = initial_R if initial_R is not None else [5.0] * num_resources
 
-    model = "model crm_dynamic()\n\n"
+    # Sanitize names
+    s_names = [sanitize(n) for n in species_names]
+    r_names = [sanitize(rn) for rn in resource_names]
 
-    # Species declarations
-    species_str = ", ".join([f"N_{i}" for i in range(num_species)] + [f"R_{j}" for j in range(num_resources)])
-    model += f"    species {species_str};\n\n"
+    model = "model crm_named()\n\n"
 
-    # Parameter declarations
-    for i in range(num_species):
-        model += f"    tau_{i} = {tau[i]}; m_{i} = {m[i]};\n"
-    for j in range(num_resources):
-        model += f"    w_{j} = {w[j]}; r_{j} = {r[j]}; K_{j} = {K_or_kappa[j]};\n"
-    for i in range(num_species):
-        for j in range(num_resources):
-            model += f"    c_{i}_{j} = {c[i][j]};\n"
+    # Species declaration
+    species_decl = ", ".join(s_names + r_names)
+    model += f"    species {species_decl};\n\n"
+
+    # Parameters
+    for i, s in enumerate(s_names):
+        model += f"    tau_{s} = {tau[i]}; m_{s} = {m[i]};\n"
+    for j, rname in enumerate(r_names):
+        model += f"    w_{rname} = {w[j]}; r_{rname} = {r[j]}; K_{rname} = {K_or_kappa[j]};\n"
+    for i, s in enumerate(s_names):
+        for j, rname in enumerate(r_names):
+            model += f"    c_{s}_{rname} = {c[i][j]};\n"
+
     model += "\n"
 
     # Initial conditions
-    for i in range(num_species):
-        model += f"    N_{i} = {initial_N[i]};\n"
-    for j in range(num_resources):
-        model += f"    R_{j} = {initial_R[j]};\n"
+    for i, s in enumerate(s_names):
+        model += f"    {s} = {initial_N[i]};\n"
+    for j, rname in enumerate(r_names):
+        model += f"    {rname} = {initial_R[j]};\n"
 
     model += "\n"
 
-    # Species dynamics
-    for i in range(num_species):
-        growth_expr = " + ".join([f"c_{i}_{j} * w_{j} * R_{j}" for j in range(num_resources)])
-        model += f"    N_{i}' = (N_{i} / tau_{i}) * ({growth_expr} - m_{i});\n"
+    # Biomass growth
+    for i, s in enumerate(s_names):
+        growth_terms = " + ".join([f"c_{s}_{r} * w_{r} * {r}" for r in r_names])
+        model += f"    {s}' = ({s} / tau_{s}) * ({growth_terms} - m_{s});\n"
 
     # Resource dynamics
-    for j in range(num_resources):
+    for j, r in enumerate(r_names):
         if resource_mode == 'logistic':
-            regen = f"(r_{j} / K_{j}) * (K_{j} - R_{j}) * R_{j}"
-            cons = " + ".join([f"N_{i} * c_{i}_{j} * R_{j}" for i in range(num_species)])
+            regen = f"(r_{r} / K_{r}) * (K_{r} - {r}) * {r}"
+            consumption = " + ".join([f"{s} * c_{s}_{r} * {r}" for s in s_names])
         elif resource_mode == 'external':
-            regen = f"r_{j} * (K_{j} - R_{j})"
-            cons = " + ".join([f"N_{i} * c_{i}_{j} * R_{j}" for i in range(num_species)])
+            regen = f"r_{r} * (K_{r} - {r})"
+            consumption = " + ".join([f"{s} * c_{s}_{r} * {r}" for s in s_names])
         elif resource_mode == 'tilman':
-            regen = f"r_{j} * (K_{j} - R_{j})"
-            cons = " + ".join([f"N_{i} * c_{i}_{j}" for i in range(num_species)])
+            regen = f"r_{r} * (K_{r} - {r})"
+            consumption = " + ".join([f"{s} * c_{s}_{r}" for s in s_names])
         else:
             raise ValueError("Unsupported resource_mode")
 
-        model += f"    R_{j}' = {regen} - ({cons});\n"
+        model += f"    {r}' = {regen} - ({consumption});\n"
 
     model += "\nend\n"
     return model
-
 
 import tellurium as te
 import basico
@@ -266,32 +268,46 @@ def run_basico_simulation_from_antimony(ant_str, duration=200, steps=1000):
     return result_df
 
 
-import matplotlib.pyplot as plt
-
-def plot_all_species_trajectories(df, species_prefix='N_', title='Population Dynamics', ylabel='Population (cells/mL)'):
+def plot_species_and_resources(df, species_names, resource_names, title='CRM Dynamics'):
     """
-    Plot time series for all species in the DataFrame that match a given prefix.
+    Plot both species and resource dynamics from Basico simulation output.
 
     Args:
-        df (pd.DataFrame): Output of basico.run_time_course()
-        species_prefix (str): Filter species columns by this prefix (default 'N_')
-        title (str): Title of the plot
-        ylabel (str): Label for Y-axis
+        df (pd.DataFrame): Result from basico.run_time_course()
+        species_names (list): Original species names used in Antimony (sanitized)
+        resource_names (list): Original resource names used in Antimony (sanitized)
+        title (str): Title of the overall plot
     """
-    plt.figure(figsize=(8, 6))
+    def sanitize(name):
+        import re
+        return re.sub(r'\W|^(?=\d)', '_', name)
+
+    s_names = [sanitize(n) for n in species_names]
+    r_names = [sanitize(r) for r in resource_names]
 
     time = df.index
-    species_cols = [col for col in df.columns if col.startswith(species_prefix)]
 
-    if not species_cols:
-        raise ValueError(f"No species found with prefix '{species_prefix}' in DataFrame.")
+    # Plot species
+    plt.figure(figsize=(10, 5))
+    for name in s_names:
+        if name in df.columns:
+            plt.plot(time, df[name], label=name)
+    plt.xlabel("Time (hours)")
+    plt.ylabel("Population (cells/mL)")
+    plt.title(f"{title} - Species")
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.show()
 
-    for col in species_cols:
-        plt.plot(time, df[col], label=col)
-
-    plt.xlabel('Time (hours)')
-    plt.ylabel(ylabel)
-    plt.title(title)
+    # Plot resources
+    plt.figure(figsize=(10, 5))
+    for r in r_names:
+        if r in df.columns:
+            plt.plot(time, df[r], label=r)
+    plt.xlabel("Time (hours)")
+    plt.ylabel("Resource Concentration")
+    plt.title(f"{title} - Resources")
     plt.legend()
     plt.grid()
     plt.tight_layout()

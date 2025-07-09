@@ -1,6 +1,76 @@
 import numpy as np
 from scipy.integrate import odeint
 import matplotlib.pyplot as plt
+from cobra.io import read_sbml_model
+from cobra import Model
+
+
+# dFBA timestep function
+def dfba_timestep(
+    model: Model,
+    initial_conditions: dict,
+    kinetic_params: dict,
+    substrate_to_reaction_map: dict,
+    biomass_name_map: tuple,
+    dt: float,
+):
+    updated_state = initial_conditions.copy()
+
+    # Set substrate uptake bounds using Michaelis-Menten kinetics
+    for substrate_id, reaction_id in substrate_to_reaction_map.items():
+        Km, Vmax = kinetic_params[substrate_id]
+        S = initial_conditions[substrate_id]
+        flux = Vmax * S / (Km + S + 1e-8)  # avoid divide-by-zero
+        model.reactions.get_by_id(reaction_id).lower_bound = -flux  # uptake is negative
+
+    # Solve FBA
+    solution = model.optimize()
+
+    # Get current biomass and biomass flux (growth rate)
+    biomass_id, biomass_rxn = biomass_name_map
+    biomass_flux = solution.fluxes[biomass_rxn]
+    current_biomass = updated_state[biomass_id]
+
+    # Update biomass using: dX = µ * X * dt
+    new_biomass = current_biomass + (biomass_flux * current_biomass * dt)
+    updated_state[biomass_id] = new_biomass
+
+    # Update substrates using: dS = flux * biomass * dt
+    for substrate_id, reaction_id in substrate_to_reaction_map.items():
+        flux = solution.fluxes[reaction_id]
+        substrate_conc = updated_state[substrate_id]
+        updated_state[substrate_id] = substrate_conc + (flux * current_biomass * dt)
+
+    return updated_state
+
+
+# Perform full dFBA simulation
+def perform_dfba(
+    model: Model,
+    initial_conditions: dict,
+    kinetic_params: dict,
+    substrate_to_reaction_map: dict,
+    biomass_name_map: tuple,
+    dt: float,
+    total_steps: int,
+):
+    results = {key: [value] for key, value in initial_conditions.items()}
+    current_state = initial_conditions.copy()
+
+    for _ in range(total_steps):
+        current_state = dfba_timestep(
+            model,
+            current_state,
+            kinetic_params,
+            substrate_to_reaction_map,
+            biomass_name_map,
+            dt,
+        )
+        for key in current_state:
+            results[key].append(current_state[key])
+
+    return results
+
 
 class AdaptiveMetabolicSimulator:
     def __init__(self, params, initial_conditions, t, mode='single'):

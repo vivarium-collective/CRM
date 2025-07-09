@@ -6,6 +6,7 @@ import re
 import os
 
 
+
 # This function create a dictionary of model names and their paths.
 def xml_dict(path, ext='.xml'):
     path = path
@@ -260,9 +261,37 @@ def run_basico_simulation_from_antimony(ant_str, duration=200, steps=1000):
     model = basico.load_model_from_string(sbml_str)
 
     # Simulate using Basico
-    result_df = basico.run_time_course(duration=duration, steps=steps)
+    result_df = basico.run_time_course(model=model, duration=duration, steps=steps)
 
     return result_df
+
+
+def save_antimony_as_sbml(model_str: str, filename: str = "adaptive_strategy_model.xml", path: str = None):
+    """
+    Convert an Antimony model string to SBML and save it to a file.
+
+    Parameters:
+    - model_str: str, Antimony-formatted model string.
+    - filename: str, name of the output SBML file (default is 'adaptive_strategy_model.xml').
+    - path: str, optional directory path to save the file.
+    """
+    try:
+        r = te.loada(model_str)
+        sbml_str = r.getSBML()
+
+        # Handle path if provided
+        if path is not None:
+            os.makedirs(path, exist_ok=True)
+            full_path = os.path.join(path, filename)
+        else:
+            full_path = filename
+
+        with open(full_path, "w") as f:
+            f.write(sbml_str)
+
+        print(f"SBML model saved as '{full_path}'")
+    except Exception as e:
+        print(f"Failed to convert or save model: {e}")
 
 
 def plot_species_and_resources(df, species_names, resource_names, title='CRM Dynamics',

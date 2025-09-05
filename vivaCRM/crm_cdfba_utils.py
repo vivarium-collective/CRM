@@ -82,21 +82,25 @@ def initial_environment(
     }
 
 if __name__ == "__main__":
+    substrates=get_substrates(model_file="textbook", exchanges=["EX_glc__D_e", "EX_ac_e"])
     # 1) Simple, all defaults
     env = initial_environment(
         volume=1.0,
         species_list=["E.coli", "S.flexneri"],
-        substrates=["EX_glc__D_e", "EX_ac_e"]
+        substrates=substrates
     )
     print(env)
 
     # 2) Per-item overrides
+    new_substrates = get_substrates(model_file = "textbook", exchanges = ["EX_glc__D_e", "EX_ac_e", "EX_o2_e"])
+    print(new_substrates)
+
     env = initial_environment(
         volume=2.0,
         species_list=["E.coli", "Yeast"],
-        substrates=["EX_glc__D_e", "EX_ac_e", "EX_o2_e"],
+        substrates=new_substrates,
         biomass_overrides={"Yeast": 0.2},
-        resource_overrides={"EX_glc__D_e": 40.0, "EX_o2_e": 100.0},
+        resource_overrides={"D-Glucose": 40.0, "O2": 100.0},
         default_resource=0.0,  # any resource not overridden -> 0
     )
     print(env)
@@ -104,6 +108,6 @@ if __name__ == "__main__":
     # 3) Provide the full dict yourself
     env = initial_environment(
         volume=1.5,
-        initial_counts={"EX_glc__D_e": 60.0, "EX_ac_e": 0.0, "E.coli": 0.1}
+        initial_counts={"D-Glucose": 60.0, "Acetate": 0.0, "E.coli": 0.1}
     )
     print(env)

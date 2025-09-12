@@ -24,6 +24,7 @@ except Exception:
     cobra = None
     cobra_pfba = None
 
+import numpy as np
 
 # ============================================================================
 # 0) Helpers for a reasonable medium during extraction
@@ -531,3 +532,68 @@ def make_initial_state(species_names: list, resource_names: list,
         "concentrations": {r: float(R0_by_resource.get(r, 0.0)) for r in resource_names},
         "strategies": strategies,
     }
+
+def build_params(
+    species_names: List[str],
+    resource_names: List[str],
+    *,
+    yields_map: Dict[str, Dict[str, float]],
+    vmax_map: Dict[str, Dict[str, float]],
+    maintenance_map: Dict[str, float],
+    Km_map: Dict[str, float],
+    byproducts_map: Dict[str, Dict[str, Dict[str, float]]],
+    dilution: float = 0.0,
+    feed_map: Optional[Dict[str, float]] = None,
+    resource_loss_map: Optional[Dict[str, float]] = None,
+    byproduct_sign: str = "as_is",  # "as_is" | "abs" | "neg_to_pos"
+) -> MCRMParams:
+    m, p = len(species_names), len(resource_names)
+    s_idx = {s: i for i, s in enumerate(species_names)}
+    r_idx = {r: j for j, r in enumerate(resource_names)}
+
+    Y  = np.zeros((m, p))
+    V  = np.zeros((m, p))
+    B  = np.zeros((m, p, p))
+    Km = np.zeros(p)
+    M  = np.zeros(m)
+
+    feed = None
+    if dilution > 0.0:
+        feed = np.zeros(p)
+        if feed_map:
+            for r, j in r_idx.items():
+                feed[j] = float(feed_map.get(r, 0.0))
+
+    loss = None
+    if resource_loss_map is not None:
+        loss = np.zeros(p)
+        for r, j in r_idx.items():
+            loss[j] = float(resource_loss_map.get(r, 0.0))
+
+    for s, si in s_idx.items():
+        M[si] = float(maintenance_map.get(s, 0.02))
+        yrow = yields_map.get(s, {}) or {}
+        vrow = vmax_map.get(s, {}) or {}
+        for r, rj in r_idx.items():
+            Y[si, rj] = float(yrow.get(r, 0.0))
+            V[si, rj] = float(vrow.get(r, 0.0))
+
+    for s, si in s_idx.items():
+        for consumed, produceds in (byproducts_map.get(s, {}) or {}).items():
+            j = r_idx.get(consumed)
+            if j is None: continue
+            for produced, val in (produceds or {}).items():
+                i = r_idx.get(produced)
+                if i is None: continue
+                raw = float(val)
+                if byproduct_sign == "abs": stoich = abs(raw)
+                elif byproduct_sign == "neg_to_pos": stoich = -raw
+                else: stoich = raw
+                B[si, i, j] = stoich
+
+    for r, rj in r_idx.items():
+        Km[rj] = float(Km_map.get(r, 0.5))
+
+    params = MCRMParams(Y, V, B, Km, M, float(dilution), feed, loss)
+    params.validate()
+    return params

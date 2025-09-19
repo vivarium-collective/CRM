@@ -597,3 +597,99 @@ def build_params(
     params = MCRMParams(Y, V, B, Km, M, float(dilution), feed, loss)
     params.validate()
     return params
+
+
+#=================================================
+# Trying new way to get the yields, uptakes, and byproducts
+#=================================================
+def extract_yields_agora(
+    model,
+    resource_exchange_ids: List[str],
+    *,
+    biomass_rxn_id: str,
+    use_pfba: bool = False,
+) -> Dict[str, float]:
+    """Yield per resource (gDW/mmol) with exchange opened fully (no uptake cap)."""
+    yields: Dict[str, float] = {}
+    for ex_id in resource_exchange_ids:
+        with model as m:
+            if ex_id not in m.reactions:
+                yields[ex_id] = 0.0
+                continue
+            rxn = m.reactions.get_by_id(ex_id)
+            rxn.lower_bound = -1000.0  # fully open uptake
+
+            m.objective = m.reactions.get_by_id(biomass_rxn_id)
+            sol = _solve(m, use_pfba)
+
+            if sol.status != "optimal":
+                yields[ex_id] = 0.0
+                continue
+
+            v = float(sol.fluxes.get(ex_id, 0.0))
+            uptake = max(0.0, -v)  # uptake is negative
+            mu = float(sol.objective_value or 0.0)
+            yields[ex_id] = (mu / uptake) if uptake > 1e-12 else 0.0
+    return yields
+
+
+def extract_byproducts_agora(
+    model,
+    resource_exchange_ids: List[str],
+    *,
+    biomass_rxn_id: str,
+    use_pfba: bool = False,
+) -> Dict[str, Dict[str, float]]:
+    """Secreted exchange fluxes (mmol/gDW/h) when growing on each resource, no uptake cap."""
+    out: Dict[str, Dict[str, float]] = {}
+    for ex_id in resource_exchange_ids:
+        with model as m:
+            if ex_id not in m.reactions:
+                out[ex_id] = {}
+                continue
+            rxn = m.reactions.get_by_id(ex_id)
+            rxn.lower_bound = -1000.0
+
+            m.objective = m.reactions.get_by_id(biomass_rxn_id)
+            sol = _solve(m, use_pfba)
+
+            if sol.status != "optimal":
+                out[ex_id] = {}
+                continue
+
+            secreted: Dict[str, float] = {}
+            for ex in m.exchanges:
+                f = float(sol.fluxes.get(ex.id, 0.0))
+                if f > 1e-9:  # positive flux = secretion
+                    secreted[ex.id] = f
+            out[ex_id] = secreted
+    return out
+
+
+def extract_uptake_rates_agora(
+    model,
+    resource_exchange_ids: List[str],
+    *,
+    biomass_rxn_id: str,
+    use_pfba: bool = False,
+) -> Dict[str, float]:
+    """Actual uptake rates (mmol/gDW/h) with exchange opened fully (no cap)."""
+    uptakes: Dict[str, float] = {}
+    for ex_id in resource_exchange_ids:
+        with model as m:
+            if ex_id not in m.reactions:
+                uptakes[ex_id] = 0.0
+                continue
+            rxn = m.reactions.get_by_id(ex_id)
+            rxn.lower_bound = -1000.0
+
+            m.objective = m.reactions.get_by_id(biomass_rxn_id)
+            sol = _solve(m, use_pfba)
+
+            if sol.status != "optimal":
+                uptakes[ex_id] = 0.0
+                continue
+
+            v = float(sol.fluxes.get(ex_id, 0.0))
+            uptakes[ex_id] = max(0.0, -v)
+    return uptakes

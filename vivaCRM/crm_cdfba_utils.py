@@ -81,6 +81,14 @@ def initial_environment(
         "concentrations": concentrations,
     }
 
+
+def env_to_mcrm_state(env_dict, species, resources):
+    conc = env_dict["concentrations"]
+    return {
+        "species":       {s: float(conc.get(s, 0.0)) for s in species},
+        "concentrations":{r: float(conc.get(r, 0.0)) for r in resources},
+    }
+
 if __name__ == "__main__":
     substrates=get_substrates(model_file="textbook", exchanges=["EX_glc__D_e", "EX_ac_e"])
     # 1) Simple, all defaults

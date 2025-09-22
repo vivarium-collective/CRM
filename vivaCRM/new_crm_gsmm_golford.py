@@ -3,6 +3,7 @@ from typing import Optional, Dict, List
 import numpy as np
 from process_bigraph import Process
 from scipy.integrate import solve_ivp
+from vivaCRM.crm_cdfba_utils import env_to_mcrm_state
 
 # ---------- params ----------
 @dataclass
@@ -177,10 +178,10 @@ class MCRM_Process(Process):
         self.m, self.p = m, p
 
     def inputs(self):
-        return {"species": "map[float]", "concentrations": "map[float]"}
+        return {"shared_environment": "volumetric"}
 
     def outputs(self):
-        return {"species_delta": "map[float]", "concentrations_delta": "map[float]"}
+        return {"update": "map[float]"}
 
     def _ode(self, t, y):
         # inline rhs identical to mcrm_rhs
@@ -208,9 +209,10 @@ class MCRM_Process(Process):
 
         return np.concatenate([dn_dt, dR_dt])
 
-    def update(self, state, interval):
-        n0 = np.array([state["species"].get(s, 0.0) for s in self.species_names], float)
-        R0 = np.array([state["concentrations"].get(r, 0.0) for r in self.resource_names], float)
+    def update(self, inputs, interval):
+        state0 = env_to_mcrm_state(inputs["shared_environment"], self.species_names, self.resource_names)
+        n0 = np.array([state0["species"].get(s, 0.0) for s in self.species_names], float)
+        R0 = np.array([state0["concentrations"].get(r, 0.0) for r in self.resource_names], float)
         y0 = np.concatenate([n0, R0])
 
         sol = solve_ivp(self._ode, [0.0, float(interval)], y0,
@@ -223,7 +225,16 @@ class MCRM_Process(Process):
         if self.clip: y1 = np.maximum(y1, 0.0)
 
         n1, R1 = y1[:self.m], y1[self.m:]
+
+        volume = inputs["shared_environment"]["volume"]
+        species_delta = {s: float(n1[i] - n0[i]) for i, s in enumerate(self.species_names)}
+        species_delta = {species: species_concentration * volume for species, species_concentration in species_delta.items()}
+
+        concentration_delta = {s: float(n1[i] - n0[i]) for i, s in enumerate(self.species_names)}
+        concentration_delta = {species: species_concentration * volume for species, species_concentration in
+                         concentration_delta.items()}
+
+        update = {**species_delta, **concentration_delta}
         return {
-            "species_delta": {s: float(n1[i] - n0[i]) for i, s in enumerate(self.species_names)},
-            "concentrations_delta": {r: float(R1[j] - R0[j]) for j, r in enumerate(self.resource_names)},
+            "dfba_update": update
         }

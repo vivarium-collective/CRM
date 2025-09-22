@@ -620,7 +620,7 @@ def extract_yields_agora(
             rxn.lower_bound = -1000.0  # fully open uptake
 
             m.objective = m.reactions.get_by_id(biomass_rxn_id)
-            sol = _solve(m, use_pfba)
+            sol = model.optimize()
 
             if sol.status != "optimal":
                 yields[ex_id] = 0.0
@@ -629,6 +629,7 @@ def extract_yields_agora(
             v = float(sol.fluxes.get(ex_id, 0.0))
             uptake = max(0.0, -v)  # uptake is negative
             mu = float(sol.objective_value or 0.0)
+            print(mu)
             yields[ex_id] = (mu / uptake) if uptake > 1e-12 else 0.0
     return yields
 

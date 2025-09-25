@@ -3,7 +3,6 @@ from typing import Optional, Dict, List
 import numpy as np
 from process_bigraph import Process
 from scipy.integrate import solve_ivp
-from vivaCRM.crm_cdfba_utils import env_to_mcrm_state
 
 # ---------- params ----------
 @dataclass
@@ -14,8 +13,8 @@ class MCRMParams:
     Km: np.ndarray                # (p,)   mmol/L
     maintenance: np.ndarray       # (m,)   1/h
     dilution: float = 0.0         # 1/h
-    feed: Optional[np.ndarray] = None       # (p,)
-    resource_loss: Optional[np.ndarray] = None  # (p,)
+    feed: Optional[np.ndarray] = None              # (p,)
+    resource_loss: Optional[np.ndarray] = None     # (p,)
 
     def validate(self) -> None:
         m, p = self.yields.shape
@@ -28,33 +27,10 @@ class MCRMParams:
         if self.resource_loss is not None:
             assert self.resource_loss.shape == (p,)
 
-
-# ---------- CRM Ode ----------
+# ---------- helpers ----------
 def _monod_u(R: np.ndarray, Km: np.ndarray) -> np.ndarray:
     return R / (Km + R + 1e-12)
 
-def mcrm_rhs(t: float, x: np.ndarray, params: MCRMParams) -> np.ndarray:
-    params.validate()
-    m, p = params.yields.shape
-    n = x[:m]
-    R = x[m:]
-
-    u = _monod_u(R, params.Km)              # (p,)
-    v = params.vmax * u[None, :]            # (m,p)
-    growth = (params.yields * v).sum(axis=1)
-    dn = n * (growth - params.maintenance - params.dilution)
-
-    consumption = (n[:, None] * v).sum(axis=0)    # (p,)
-    produced = np.zeros(p)
-    for s in range(m):
-        produced += n[s] * (params.B[s] @ v[s])
-
-    feed_term = np.zeros(p) if params.dilution == 0.0 else params.dilution * (params.feed - R)
-    loss_term = np.zeros(p) if params.resource_loss is None else params.resource_loss * R
-    dR = feed_term - consumption + produced - loss_term
-
-    return np.concatenate([dn, dR])
-#%%
 def build_params(
     species_names: List[str],
     resource_names: List[str],
@@ -108,33 +84,35 @@ def build_params(
                 i = r_idx.get(produced)
                 if i is None: continue
                 raw = float(val)
-                if byproduct_sign == "abs": stoich = abs(raw)
-                elif byproduct_sign == "neg_to_pos": stoich = -raw
-                else: stoich = raw
+                stoich = abs(raw) if byproduct_sign == "abs" else (-raw if byproduct_sign == "neg_to_pos" else raw)
                 B[si, i, j] = stoich
 
     for r, rj in r_idx.items():
         Km[rj] = float(Km_map.get(r, 0.5))
 
-    params = MCRMParams(Y, V, B, Km, M, float(dilution), feed, loss)
-    params.validate()
-    return params
+    P = MCRMParams(Y, V, B, Km, M, float(dilution), feed, loss)
+    P.validate()
+    return P
 
-#%%
+# ---------- process ----------
 class MCRM_Process(Process):
     """
-    Minimal Goldford-MCRM process for process_bigraph.
-    Ports:
-      inputs : species (map[float]), concentrations (map[float])
-      outputs: species_delta (map[float]), concentrations_delta (map[float])
+    Minimal MCRM for process_bigraph with explicit ports (no shared_environment).
+
+    Inputs:
+      - species         : map[float]   (keys are species_names; values = biomasses/concentrations)
+      - concentrations  : map[float]   (keys are resource_names; values = concentrations)
+
+    Outputs:
+      - species_delta         : map[float]
+      - concentrations_delta  : map[float]
     """
 
     config_schema = {
         "species_names": "list[string]",
         "resource_names": "list[string]",
-        "params": "any",  # pass MCRMParams or dict-of-arrays
-        # optional solver knobs:
-        "method": {"_type": "string",  "_default": "RK45"},
+        "params": "any",  # MCRMParams or dict with arrays
+        "method": {"_type": "string",  "_default": "LSODA"},
         "rtol":   {"_type": "float",   "_default": 1e-5},
         "atol":   {"_type": "float",   "_default": 1e-7},
         "max_step": {"_type": "float", "_default": 0.05},
@@ -145,7 +123,8 @@ class MCRM_Process(Process):
         if isinstance(p, MCRMParams):
             return p
         if isinstance(p, dict):
-            feed = p.get("feed", None); loss = p.get("resource_loss", None)
+            feed = p.get("feed", None)
+            loss = p.get("resource_loss", None)
             return MCRMParams(
                 yields=np.asarray(p["yields"], float),
                 vmax=np.asarray(p["vmax"], float),
@@ -156,7 +135,7 @@ class MCRM_Process(Process):
                 feed=None if feed is None else np.asarray(feed, float),
                 resource_loss=None if loss is None else np.asarray(loss, float),
             )
-        raise ValueError("config['params'] must be MCRMParams or dict with arrays")
+        raise ValueError("config['params'] must be MCRMParams or a dict with required arrays.")
 
     def initialize(self, config):
         self.species_names  = list(config["species_names"])
@@ -166,25 +145,30 @@ class MCRM_Process(Process):
 
         m, p = self.params.yields.shape
         if len(self.species_names) != m or len(self.resource_names) != p:
-            raise ValueError("names length must match array shapes")
+            raise ValueError("names length must match parameter array shapes")
 
         allowed = {"rk23":"RK23","rk45":"RK45","dop853":"DOP853","radau":"Radau","bdf":"BDF","lsoda":"LSODA"}
-        self.method = allowed.get(str(config.get("method","LSODA")).lower(), "LSODA")
-        self.rtol   = float(config.get("rtol", 1e-5))
-        self.atol   = float(config.get("atol", 1e-7))
+        self.method   = allowed.get(str(config.get("method","LSODA")).lower(), "LSODA")
+        self.rtol     = float(config.get("rtol", 1e-5))
+        self.atol     = float(config.get("atol", 1e-7))
         self.max_step = float(config.get("max_step", 0.05))
-        self.clip   = bool(config.get("clip_nonnegative", True))
+        self.clip     = bool(config.get("clip_nonnegative", True))
 
         self.m, self.p = m, p
 
     def inputs(self):
-        return {"shared_environment": "volumetric"}
+        return {
+            "species": "map[float]",
+            "concentrations": "map[float]",
+        }
 
     def outputs(self):
-        return {"update": "map[float]"}
+        return {
+            "species_delta": "map[float]",
+            "concentrations_delta": "map[float]",
+        }
 
     def _ode(self, t, y):
-        # inline rhs identical to mcrm_rhs
         m, p = self.m, self.p
         n = y[:m]; R = y[m:]
 
@@ -210,9 +194,12 @@ class MCRM_Process(Process):
         return np.concatenate([dn_dt, dR_dt])
 
     def update(self, inputs, interval):
-        state0 = env_to_mcrm_state(inputs["shared_environment"], self.species_names, self.resource_names)
-        n0 = np.array([state0["species"].get(s, 0.0) for s in self.species_names], float)
-        R0 = np.array([state0["concentrations"].get(r, 0.0) for r in self.resource_names], float)
+        # Pull state directly from the two input maps
+        species_map = inputs["species"] or {}
+        conc_map    = inputs["concentrations"] or {}
+
+        n0 = np.array([float(species_map.get(s, 0.0)) for s in self.species_names], float)
+        R0 = np.array([float(conc_map.get(r, 0.0))    for r in self.resource_names], float)
         y0 = np.concatenate([n0, R0])
 
         sol = solve_ivp(self._ode, [0.0, float(interval)], y0,
@@ -222,19 +209,14 @@ class MCRM_Process(Process):
             raise RuntimeError(sol.message)
 
         y1 = sol.y[:, -1]
-        if self.clip: y1 = np.maximum(y1, 0.0)
+        if self.clip:
+            y1 = np.maximum(y1, 0.0)
 
         n1, R1 = y1[:self.m], y1[self.m:]
-
-        volume = inputs["shared_environment"]["volume"]
         species_delta = {s: float(n1[i] - n0[i]) for i, s in enumerate(self.species_names)}
-        species_delta = {species: species_concentration * volume for species, species_concentration in species_delta.items()}
+        concentrations_delta = {r: float(R1[j] - R0[j]) for j, r in enumerate(self.resource_names)}
 
-        concentration_delta = {s: float(n1[i] - n0[i]) for i, s in enumerate(self.species_names)}
-        concentration_delta = {species: species_concentration * volume for species, species_concentration in
-                         concentration_delta.items()}
-
-        update = {**species_delta, **concentration_delta}
         return {
-            "dfba_update": update
+            "species_delta": species_delta,
+            "concentrations_delta": concentrations_delta,
         }

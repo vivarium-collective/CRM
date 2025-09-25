@@ -180,7 +180,7 @@ def get_crm_goldford_emitter(state_keys):
     Returns a standard emitter step spec for CRM Goldford simulations.
     Includes only the state keys present.
     """
-    POSSIBLE_KEYS = {"Shared Environment", "strategies", "global_time"}
+    POSSIBLE_KEYS = {"concentrations", "species", "strategies", "global_time"}
     included = [k for k in POSSIBLE_KEYS if k in state_keys]
     return emitter_from_wires({k: [k] for k in included})
 
